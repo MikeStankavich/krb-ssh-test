@@ -1,0 +1,87 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+VAGRANTFILE_API_VERSION = "2"
+ENV['VAGRANT_DEFAULT_PROVIDER'] = 'virtualbox'
+AD_REALM = "JAXPK.COM"
+AD_DOMAIN = "jaxpk.com"
+AD_ADMIN = "Administrator@#{AD_DOMAIN}"
+AD_PASS = "scmd3M()"
+AD_DC_IP = "54.82.246.87"
+AD_DC_HOST = "scm-demo-dc.jaxpk.com"
+
+def config_ad(sso) 
+
+        sso.vm.provision "fix-no-tty", type: "shell" do |s|
+            s.privileged = false
+            s.inline = "sudo sed -i '/tty/!s/mesg n/tty -s \\&\\& mesg n/' /root/.profile"
+        end
+
+#        sso.vm.network "private_network", type: "dhcp"
+
+	# install packages needed to support AD SSO
+        sso.vm.provision "shell", inline: "sudo apt-get update"
+        sso.vm.provision "shell", inline: "sudo echo 'krb5-config krb5-config/default_realm string #{AD_REALM}' | debconf-set-selections"
+	packages = "packagekit krb5-user samba-common samba-libs samba-common-bin sssd sssd-tools realmd ntp"
+        sso.vm.provision "shell", inline: "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install #{packages}"
+
+	# add hosts file entries so that DNS lookups behave
+	sso.vm.provision "shell", inline: "sudo sed -i \"$1\" $2", args: ["/#{AD_DC_HOST}/d", "/etc/hosts"]
+	sso.vm.provision "shell", inline: "sudo sed -i \"$1\" $2", args: ["/127\.0\.0\.1 localhost/ a #{AD_DC_IP} #{AD_DC_HOST}", "/etc/hosts"]
+
+	# link up NTP to the DC so we don't have time skew
+	sso.vm.provision "shell", inline: "sudo service ntp stop"
+	sso.vm.provision "shell", inline: "sudo sed -i \"$1\" $2", args: ["/server #{AD_DC_HOST}/d", "/etc/ntp.conf"]
+	sso.vm.provision "shell", inline: "sudo sed -i \"$1\" $2", args: ["s/^server/# server/", "/etc/ntp.conf"]
+	sso.vm.provision "shell", inline: "sudo sed -i \"$1\" $2", args: ["/server ntp\.ubuntu\.com/ a server #{AD_DC_HOST}", "/etc/ntp.conf"]
+	sso.vm.provision "shell", inline: "sudo ntpdate #{AD_DC_HOST}"
+	sso.vm.provision "shell", inline: "sudo service ntp start"
+
+	# add additional entries into krb5.conf file
+#        sso.vm.provision "shell", inline: "sudo cp /etc/krb5.conf ./"
+#        sso.vm.provision "file", source: "./krb5.conf.add", destination: "./krb5.conf.add"
+
+#        dns_lookup_realm = false
+#        ticket_lifetime = 24h
+#        renew_lifetime = 7d
+#        rdns = false
+#        default_ccache_name = KEYRING:persistent:%{uid}
+
+	sed_cmd = "/[[]libdefaults[]]/ a	default_ccache_name = KEYRING:persistent:%{uid}"
+	sso.vm.provision "shell", inline: "sudo grep -q 'default_ccache_name = ' /etc/krb5.conf || sed -i \"$1\" $2", args: [sed_cmd, "/etc/krb5.conf"]
+
+	sed_cmd = "/[[]libdefaults[]]/ a  rdns = false"
+	sso.vm.provision "shell", inline: "sudo grep -q 'rdns = ' /etc/krb5.conf || sed -i \"$1\" $2", args: [sed_cmd, "/etc/krb5.conf"]
+
+	sed_cmd = "/[[]libdefaults[]]/ a 	renew_lifetime = 7d"
+	sso.vm.provision "shell", inline: "sudo grep -q 'renew_lifetime = ' /etc/krb5.conf || sed -i \"$1\" $2", args: [sed_cmd, "/etc/krb5.conf"]
+
+	sed_cmd = "/[[]libdefaults[]]/ a 	ticket_lifetime = 24h"
+	sso.vm.provision "shell", inline: "sudo grep -q 'ticket_lifetime = ' /etc/krb5.conf || sed -i \"$1\" $2", args: [sed_cmd, "/etc/krb5.conf"]
+
+	sed_cmd = "/[[]libdefaults[]]/ a 	dns_lookup_realm  = false"
+	sso.vm.provision "shell", inline: "sudo grep -q 'dns_lookup_realm = ' /etc/krb5.conf || sed -i \"$1\" $2", args: [sed_cmd, "/etc/krb5.conf"]
+
+	# create the realmd.conf file
+        sso.vm.provision "file", source: "./realmd.conf", destination: "./realmd.conf"
+        sso.vm.provision "shell", inline: "sudo cp ./realmd.conf /etc/reamld.conf"
+
+	# join domain. leave first to allow rejoin without error, ignore any error from the leave
+        sso.vm.provision "shell", inline: "sudo sh -c 'realm --verbose leave ; true'"
+        sso.vm.provision "shell", inline: "sudo realm --verbose --user=#{AD_ADMIN} join #{AD_DOMAIN} <<<'#{AD_PASS}'"
+
+  end
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  config.vm.define "sso1" do |sso1|
+    sso1.vm.hostname = "ssotest1.#{AD_DOMAIN}"
+    sso1.vm.box = "ubuntu/trusty64"
+
+        sso1.vm.provider :virtualbox do |v|
+#            v.name      = name
+            v.memory    = 512
+            v.cpus      = 2
+            v.customize ["modifyvm", :id, "--ioapic", "on"]
+        end
+  configure_ad(sso1)
+end
